@@ -1,15 +1,11 @@
-'''Command to run:
-python grad-cam.py --image-path 'sample_4.pickle' --use-cuda --model 'storage/models/consonant_diacritic.pth' --label 'label_4_vowel.pickle' 
-'''
 
+# Learn more or give us feedback
 import argparse
 import cv2
 import numpy as np
 import torch
 from torch.autograd import Function
 from torchvision import models
-import torch.nn as nn
-import torch.nn.functional as F
 import pickle
 
 class FeatureExtractor():
@@ -28,7 +24,9 @@ class FeatureExtractor():
         outputs = []
         self.gradients = []
         for name, module in self.model._modules.items():
-            x = module(x)
+            # Do this for all but the FC layer
+            if name != 'fc':
+                x = module(x)
             if name in self.target_layers:
                 x.register_hook(self.save_gradient)
                 outputs += [x]
@@ -50,8 +48,10 @@ class ModelOutputs():
 
     def __call__(self, x):
         target_activations, output = self.feature_extractor(x)
-#         output = output.view(output.size(0), -1)
-#         output = self.model.fc3(output) # changed from model.classifier 
+        
+        # flatten and apply the fc layer
+        output = output.view(output.size(0), -1)
+        output = self.model.fc(output)
         return target_activations, output
 
 
@@ -68,7 +68,6 @@ def preprocess_image(img):
     preprocessed_img = torch.from_numpy(preprocessed_img)
     preprocessed_img.unsqueeze_(0)
     input = preprocessed_img.requires_grad_(True)
-        
     return input
 
 
@@ -113,6 +112,7 @@ class GradCam:
 #         self.model.features.zero_grad()
 #         self.model.classifier.zero_grad()
         one_hot.backward(retain_graph=True)
+
         grads_val = self.extractor.get_gradients()[-1].cpu().data.numpy()
 
         target = features[-1]
@@ -125,10 +125,10 @@ class GradCam:
             cam += w * target[i, :, :]
 
         cam = np.maximum(cam, 0)
-        cam = cv2.resize(cam, (136, 136)) # changed from (224, 224)
-        cam = cam - np.min(cam) 
+        cam = cv2.resize(cam, (224, 224))
+        cam = cam - np.min(cam)
         cam = cam / np.max(cam)
-        return cam, index
+        return cam
 
 
 class GuidedBackpropReLU(Function):
@@ -190,6 +190,7 @@ class GuidedBackpropReLUModel:
         # self.model.features.zero_grad()
         # self.model.classifier.zero_grad()
         one_hot.backward(retain_graph=True)
+
         output = input.grad.cpu().data.numpy()
         output = output[0, :, :, :]
 
@@ -223,128 +224,7 @@ def deprocess_image(img):
     img = np.clip(img, 0, 1)
     return np.uint8(img*255)
 
-# Define a flatten class to be picked up by the 
-class Flatten(nn.Module):
-    def forward(self, input):
-        return input.view(input.size(0), -1)
-    
-class Net(nn.Module):
 
-    def __init__(self):
-        super(Net, self).__init__()
-       
-        # Define the Parameters for the neural network
-        # see if neutron can help visualize my network
-        # Look at fast ai tutorials for CNN
-        
-        # Convolution layer 1
-        self.conv1_input_channels = 1
-        self.conv1_kernel_size = 9
-        self.conv1_stride = 1
-        self.conv1_output_channels = 16
-        self.conv1_output_dim = output_size(img_resize, 
-                                            self.conv1_kernel_size, 
-                                            self.conv1_stride)
-        
-        # Pooling layer 1
-        self.pool1_kernel_size = 11
-        self.pool1_stride = 2
-        self.pool1_output_dim = output_size(self.conv1_output_dim, 
-                                            self.pool1_kernel_size, 
-                                            self.pool1_stride)
-       
-        #conv 2
-        self.conv2_input_channels = self.conv1_output_channels
-        self.conv2_kernel_size = 8
-        self.conv2_stride = 1
-        self.conv2_output_channels = 32
-        self.conv2_output_dim = output_size(self.pool1_output_dim,
-                                            self.conv2_kernel_size, 
-                                            self.conv2_stride)
-        
-        # Pooling layer 2
-        self.pool2_kernel_size = 8
-        self.pool2_stride = 2
-        self.pool2_output_dim = output_size(self.conv2_output_dim,
-                                           self.pool2_kernel_size,
-                                           self.pool2_stride)
-        
-        # Fully connected 1 (input is batch_size x height x width after pooling)
-        self.fc1_input_features = self.conv2_output_channels * self.pool2_output_dim**2
-        self.fc1_output_features = 256
-       
-        # Fully connected 2
-        self.fc2_input_features = self.fc1_output_features
-        self.fc2_output_features = 200
-           
-        # Fully Connected 3 (output is number of features)
-        self.fc3_input_features = self.fc2_output_features
-        self.fc3_output_features = 168
-        
-        # Create the layers
-        self.conv1 = nn.Conv2d(self.conv1_input_channels, 
-                               self.conv1_output_channels, 
-                               self.conv1_kernel_size, 
-                               stride=self.conv1_stride)
-        
-        self.max_pool1 = nn.MaxPool2d(self.pool1_kernel_size, self.pool1_stride)
-        
-        self.conv2 = nn.Conv2d(self.conv2_input_channels, 
-                               self.conv2_output_channels, 
-                               self.conv2_kernel_size,
-                               stride=self.conv2_stride)
-        
-        self.max_pool2 = nn.MaxPool2d(self.pool2_kernel_size, self.pool2_stride)
-        
-        self.flatten = Flatten()
-        
-        self.fc1 = nn.Linear(self.fc1_input_features, self.fc1_output_features)
-        
-        self.fc2 = nn.Linear(self.fc2_input_features, self.fc2_output_features)
-        
-        self.fc3 = nn.Linear(self.fc3_input_features, self.fc3_output_features)
-        
-        self.features = [self.conv1, self.conv2, self.fc1, self.fc2, self.fc3]
-
-      
-
-    def forward(self, x):
-        # run the tensor through the layers
-        x = F.relu(self.conv1(x))
-        x = self.max_pool1(x)
-        x = F.relu(self.conv2(x))
-        x = self.max_pool2(x)
-        x = self.flatten(x)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
-
-    def num_flat_features(self, x):
-        # number of flat features to determine the size of the first fully connected layer
-        size = x.size()[1:] 
-        num_features = 1
-        for s in size:
-            num_features *= s
-        return num_features
-    
-    # Define a features attribute
-
-def copy_bw_to_rgb(input_image):
-    # Converts torch image to RGB from BW and copies to cpu
-    
-    # Create a cpu copy of the input called img for plotting
-    from copy import deepcopy
-    img = deepcopy(input_image).cpu().numpy()
-    
-    # Reshape
-    img = np.squeeze(img)
-    
-    # copy to RGB
-    img = np.stack((img,)*3, axis=-1)
-    
-    return img
-    
 if __name__ == '__main__':
     """ python grad_cam.py <path_to_image>
     1. Loads an image with opencv.
@@ -355,45 +235,32 @@ if __name__ == '__main__':
 
     args = get_args()
 
-    # Import model
-    model = torch.load(args.model)
-    
-    
-    # Import label
-    with open(args.label, 'rb') as f:
-        label = np.asscalar(pickle.load(f).cpu().numpy())
-    
-    
     # Can work with any model, but it assumes that the model has a
     # feature method, and a classifier method,
     # as in the VGG models in torchvision.
+    
+    #Load the model and state dict
+    model = torch.hub.load('pytorch/vision:v0.5.0', 'resnet18', pretrained=True)
+    model.load_state_dict(torch.load(args.model))
+    
+    # Load the label
+    with open(args.label, 'rb') as f:
+        label = np.asscalar(pickle.load(f).cpu().numpy())
+    
     grad_cam = GradCam(model=model, \
-                       target_layer_names=['conv1', 'conv2'], use_cuda=args.use_cuda)
+                       target_layer_names=["layer4"], use_cuda=args.use_cuda)
 
-#     img = cv2.imread(args.image_path, 1)
-#     img = np.float32(cv2.resize(img, (224, 224))) / 255
-#     input = preprocess_image(img)
-## Use my own input image
+    img = cv2.imread(args.image_path, 1)
+    img = np.float32(cv2.resize(img, (224, 224))) / 255
 
-    
-    with open(args.image_path, 'rb') as f:
-        input = torch.Tensor(pickle.load(f)).to(torch.device('cuda:0'))
-    # prepare input
-    input = input.reshape((1,1,136,136))
-    
+    input = preprocess_image(img)
 
-    # post process input to image
-    img = copy_bw_to_rgb(input)
-
-    # Turn on gradient tracking for input
-    input = input.requires_grad_(True)
-   
     # If None, returns the map for the highest scoring category.
     # Otherwise, targets the requested index.
     target_index = label
-    mask, pred_index = grad_cam(input, target_index)
+    mask = grad_cam(input, target_index)
 
-    show_cam_on_image(img, mask, pred_index, args.prefix)
+    show_cam_on_image(img, mask, label, args.prefix)
 
     gb_model = GuidedBackpropReLUModel(model=model, use_cuda=args.use_cuda)
     gb = gb_model(input, index=target_index)
@@ -402,5 +269,5 @@ if __name__ == '__main__':
     cam_gb = deprocess_image(cam_mask*gb)
     gb = deprocess_image(gb)
 
-    cv2.imwrite(f'{args.prefix}_{pred_index}_gb.jpg', gb)
-    cv2.imwrite(f'{args.prefix}_{pred_index}_cam_gb.jpg', cam_gb)
+    cv2.imwrite(f'{args.prefix}_{label}_gb.jpg', gb)
+    cv2.imwrite(f'{args.prefix}_{label}_cam_gb.jpg', cam_gb)
